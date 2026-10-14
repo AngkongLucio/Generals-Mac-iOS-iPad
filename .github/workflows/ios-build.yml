@@ -25,9 +25,39 @@ jobs:
           echo "VCPKG_ROOT=$HOME/vcpkg" >> "$GITHUB_ENV"
 
       - name: Install Vulkan SDK
+        shell: bash
         run: |
-          echo "Vulkan SDK must be installed before configuring iOS."
-          echo "See https://vulkan.lunarg.com/sdk/home"
+          set -euo pipefail
+
+          SDK_VERSION="$(curl -fsSL https://vulkan.lunarg.com/sdk/latest/mac.txt)"
+          echo "Installing Vulkan SDK ${SDK_VERSION}"
+
+          curl -fL \
+            "https://sdk.lunarg.com/sdk/download/${SDK_VERSION}/mac/vulkan_sdk.zip?Human=true" \
+            -o "$RUNNER_TEMP/vulkan_sdk.zip"
+
+          mkdir -p "$RUNNER_TEMP/vulkan-sdk-installer"
+          cd "$RUNNER_TEMP/vulkan-sdk-installer"
+          unzip -q "$RUNNER_TEMP/vulkan_sdk.zip"
+
+          APP="$(find . -type d -name '*.app' -print -quit)"
+          test -n "$APP"
+
+          INSTALLER="$APP/Contents/MacOS/$(basename "$APP" .app)"
+          SDK_ROOT="$HOME/VulkanSDK/$SDK_VERSION"
+
+          "$INSTALLER" \
+            --root "$SDK_ROOT" \
+            --accept-licenses \
+            --default-answer \
+            --confirm-command install \
+            com.lunarg.vulkan.core \
+            com.lunarg.vulkan.ios \
+            copy_only=1
+
+          echo "VULKAN_SDK=$SDK_ROOT/macOS" >> "$GITHUB_ENV"
+
+          test -f "$SDK_ROOT/macOS/lib/MoltenVK.xcframework/ios-arm64/libMoltenVK.a"
 
       - name: Prepare iOS dependencies
         run: |

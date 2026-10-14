@@ -1,0 +1,131 @@
+name: Build IPA (TrollStore)
+
+# Ilagay sa: .github/workflows/build-ipa.yml
+# Run: Actions tab -> "Build IPA (TrollStore)" -> Run workflow
+# Output (Artifacts): GeneralsZH-TrollStore.ipa  +  Documents-starter.zip
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 180
+    env:
+      VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+      VK_VER: 1.4.350.0
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Init DXVK submodule
+        run: git submodule update --init references/fbraz3-dxvk
+
+      - name: Install toolchain
+        run: |
+          brew install cmake ninja meson pkgconf xcodegen ldid autoconf autoconf-archive automake libtool
+          git clone https://github.com/microsoft/vcpkg "$VCPKG_ROOT"   # FULL clone (required)
+          "$VCPKG_ROOT/bootstrap-vcpkg.sh"
+
+      # LunarG SDK (hindi Homebrew). Kailangan para sa static libMoltenVK.a (ios-arm64) sa link.
+      - name: Install Vulkan SDK (with iOS component)
+        run: |
+          curl -L -o vk.zip "https://sdk.lunarg.com/sdk/download/${VK_VER}/mac/vulkan_sdk.zip"
+          unzip -q vk.zip
+          sudo ./InstallVulkan-*.app/Contents/MacOS/InstallVulkan \
+            --root "$HOME/VulkanSDK/${VK_VER}" --accept-licenses --default-answer --confirm-command \
+            install com.lunarg.vulkan.core com.lunarg.vulkan.ios
+          echo "VULKAN_SDK=$HOME/VulkanSDK/${VK_VER}/macOS" >> "$GITHUB_ENV"
+
+      - name: Fetch MoltenVK + fonts
+        run: |
+          ./scripts/build/ios/fetch-moltenvk.sh
+          ./scripts/build/ios/stage-fonts.sh
+
+      - name: Build engine (iOS arm64)
+        run: |
+          cmake --preset ios-vulkan
+          cmake --build build/ios-vulkan --target z_generals
+
+      # Sundan ang documented packaging (Playbook sec. 5), pero walang Apple signing.
+      - name: Assemble .app (walang xcode signing)
+        run: |
+          set -euo pipefail
+          W="$PWD"
+
+          # 1) Shell app (unsigned)
+          (cd ios && xcodegen generate)
+          PROJ=$(ls -d ios/*.xcodeproj | head -n1)
+          xcodebuild -project "$PROJ" -alltargets -sdk iphoneos -configuration Release \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            SYMROOT="$W/shell-build" build
+          SHELL_APP=$(find "$W/shell-build" -type d -name "*.app" | head -n1)
+          echo "Shell app: $SHELL_APP"
+
+          rm -rf Payload && mkdir Payload
+          cp -R "$SHELL_APP" Payload/
+          APP=$(ls -d Payload/*.app)
+          EXE=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Info.plist")
+
+          # 2) Palitan ang stub executable ng totoong game binary
+          GAME=$(find build/ios-vulkan -type f -name z_generals | head -n1)
+          [ -n "$GAME" ] || { echo "Walang z_generals"; find build/ios-vulkan -maxdepth 4 -type f -perm +111 | head -50; exit 1; }
+          cp "$GAME" "$APP/$EXE"
+          echo "== Target platform (dapat platform 2):"
+          otool -l "$APP/$EXE" | grep -A2 LC_BUILD_VERSION || true
+
+          # 3) I-embed ang dylibs na hinahanap ng binary (@rpath/...)
+          mkdir -p "$APP/Frameworks"
+          otool -L "$APP/$EXE" | awk '/@rpath\//{print $1}' | while read -r dep; do
+            name=${dep#@rpath/}
+            case "$name" in */*) continue;; esac
+            base=${name%%.*}
+            src=$(find build -type f -name "$name" | head -n1 || true)
+            [ -n "$src" ] || src=$(find build -type f -name "${base}*.dylib" | head -n1 || true)
+            if [ -n "$src" ]; then cp -L "$src" "$APP/Frameworks/$name"; else echo "MISSING dylib: $name"; fi
+          done
+          # DXVK dylibs (dlopen, wala sa otool -L)
+          for n in libdxvk_d3d8.0.dylib libdxvk_d3d9.0.dylib; do
+            src=$(find build -type f -name "$n" | head -n1 || true)
+            if [ -n "$src" ]; then cp -L "$src" "$APP/Frameworks/$n"; else echo "MISSING dylib: $n"; fi
+          done
+          # MoltenVK.framework (dynamic, device slice lang)
+          MVK=$(find "$HOME" "$W" -type d -name MoltenVK.framework 2>/dev/null \
+                | grep -v Payload | grep -v simulator | grep -i "ios" | head -n1 || true)
+          [ -n "$MVK" ] || { echo "MISSING MoltenVK.framework"; exit 1; }
+          cp -R "$MVK" "$APP/Frameworks/"
+          install_name_tool -add_rpath @executable_path/Frameworks "$APP/$EXE" 2>/dev/null || true
+
+          echo "== Frameworks:"; ls -la "$APP/Frameworks"
+          echo "== Unresolved @rpath check:"; otool -L "$APP/$EXE" | grep rpath || true
+
+          # 4) Fake-sign para sa TrollStore
+          cat > ent.plist <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>com.apple.developer.kernel.increased-memory-limit</key><true/>
+            <key>get-task-allow</key><true/>
+            <key>platform-application</key><true/>
+          </dict></plist>
+          EOF
+          rm -rf "$APP/_CodeSignature" "$APP/embedded.mobileprovision"
+          find "$APP/Frameworks" -name "*.dylib" -exec ldid -S {} \;
+          ldid -S "$APP/Frameworks/MoltenVK.framework/MoltenVK"
+          ldid -Sent.plist "$APP/$EXE"
+
+          zip -qry GeneralsZH-TrollStore.ipa Payload
+          ls -lh GeneralsZH-TrollStore.ipa
+
+          # 5) Starter para sa Documents folder (fonts + config). Walang game assets.
+          mkdir -p starter/fonts
+          F=$(find "$W" "$HOME" -name arial.ttf 2>/dev/null | grep -v Payload | head -n1 || true)
+          [ -n "$F" ] && cp "$(dirname "$F")"/* starter/fonts/ || echo "walang staged fonts"
+          cp ios/config/* starter/ 2>/dev/null || true
+          (cd starter && zip -qr ../Documents-starter.zip .)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GeneralsZH-TrollStore
+          path: |
+            GeneralsZH-TrollStore.ipa
+            Documents-starter.zip

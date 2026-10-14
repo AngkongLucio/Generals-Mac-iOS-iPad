@@ -6,6 +6,7 @@ on:
 jobs:
   build:
     runs-on: macos-15
+    timeout-minutes: 360
 
     steps:
       - name: Checkout source
@@ -15,9 +16,7 @@ jobs:
 
       - name: Install build tools
         run: |
-          brew install cmake ninja meson
-          cmake --version
-          ninja --version
+          brew install cmake ninja meson xcodegen
 
       - name: Install vcpkg
         run: |
@@ -25,7 +24,21 @@ jobs:
           "$HOME/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
           echo "VCPKG_ROOT=$HOME/vcpkg" >> "$GITHUB_ENV"
 
-      - name: Check iOS configuration
+      - name: Install Vulkan SDK
         run: |
-          cmake --list-presets
+          echo "Vulkan SDK must be installed before configuring iOS."
+          echo "See https://vulkan.lunarg.com/sdk/home"
+
+      - name: Prepare iOS dependencies
+        run: |
+          git submodule update --init references/fbraz3-dxvk
+          ./scripts/build/ios/fetch-moltenvk.sh
+          ./scripts/build/ios/stage-fonts.sh
+
+      - name: Configure iOS
+        run: |
           cmake --preset ios-vulkan
+
+      - name: Build engine
+        run: |
+          cmake --build build/ios-vulkan --target z_generals --parallel 3

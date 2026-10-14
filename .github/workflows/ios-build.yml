@@ -15,7 +15,7 @@ jobs:
 
       - name: Install build tools
         run: |
-          brew install cmake ninja
+          brew install cmake ninja meson
           cmake --version
           ninja --version
 

@@ -1,4 +1,4 @@
-name: iOS Build
+name: iOS Engine Build
 
 on:
   workflow_dispatch:
@@ -7,26 +7,16 @@ jobs:
   build:
     runs-on: macos-15
     steps:
-      - name: Checkout repository
+      - name: Checkout source
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Select Xcode
-        run: |
-          xcodebuild -version
-          xcode-select -p
-
       - name: Install build tools
         run: |
-          brew install cmake ninja xcodegen
-          git clone https://github.com/microsoft/vcpkg "$HOME/vcpkg"
-          "$HOME/vcpkg/bootstrap-vcpkg.sh"
+          brew install cmake ninja
 
-      - name: Check iOS build prerequisites
+      - name: Check iOS preset
         run: |
-          echo "Checking iOS preset..."
           cmake --list-presets
-          echo "Checking iOS packaging script..."
-          test -f scripts/build/ios/package-ios-zh.sh
-          echo "Prerequisite check complete."
+          cmake --preset ios-vulkan

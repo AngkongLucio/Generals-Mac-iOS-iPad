@@ -28,15 +28,24 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           SDK_VERSION="$(curl -fsSL https://vulkan.lunarg.com/sdk/latest/mac.txt)"
-          curl -fL "https://sdk.lunarg.com/sdk/download/${SDK_VERSION}/mac/vulkan_sdk.zip?Human=true" -o "$RUNNER_TEMP/vulkan_sdk.zip"
+          echo "Installing Vulkan SDK ${SDK_VERSION}"
+
+          curl -fL \
+            "https://sdk.lunarg.com/sdk/download/${SDK_VERSION}/mac/vulkan_sdk.zip?Human=true" \
+            -o "$RUNNER_TEMP/vulkan_sdk.zip"
+
           mkdir -p "$RUNNER_TEMP/vulkan-sdk-installer"
           cd "$RUNNER_TEMP/vulkan-sdk-installer"
           unzip -q "$RUNNER_TEMP/vulkan_sdk.zip"
+
           APP="$(find . -type d -name '*.app' -print -quit)"
           test -n "$APP"
+
           INSTALLER="$APP/Contents/MacOS/$(basename "$APP" .app)"
           SDK_ROOT="$HOME/VulkanSDK/$SDK_VERSION"
+
           "$INSTALLER" \
             --root "$SDK_ROOT" \
             --accept-licenses \
@@ -45,7 +54,9 @@ jobs:
             com.lunarg.vulkan.core \
             com.lunarg.vulkan.ios \
             copy_only=1
+
           echo "VULKAN_SDK=$SDK_ROOT/macOS" >> "$GITHUB_ENV"
+
           test -f "$SDK_ROOT/macOS/lib/MoltenVK.xcframework/ios-arm64/libMoltenVK.a"
 
       - name: Prepare iOS dependencies
@@ -55,10 +66,12 @@ jobs:
           ./scripts/build/ios/stage-fonts.sh
 
       - name: Configure iOS
-        run: cmake --preset ios-vulkan
+        run: |
+          cmake --preset ios-vulkan
 
       - name: Build engine
-        run: cmake --build build/ios-vulkan --target z_generals --parallel 3
+        run: |
+          cmake --build build/ios-vulkan --target z_generals --parallel 3
 
       - name: Package IPA
         shell: bash
@@ -66,6 +79,7 @@ jobs:
           set -euo pipefail
 
           APP_PATH="$(find build/ios-vulkan -type d -name 'GeneralsXZH.app' -print -quit)"
+
           if [[ -z "$APP_PATH" ]]; then
             APP_PATH="$(find build/ios-vulkan -type d -name '*.app' -print -quit)"
           fi
@@ -78,6 +92,11 @@ jobs:
 
           if [[ ! -f "$APP_PATH/GeneralsXZH" ]]; then
             echo "ERROR: GeneralsXZH executable missing from $APP_PATH"
+            exit 1
+          fi
+
+          if [[ ! -f "$APP_PATH/Info.plist" ]]; then
+            echo "ERROR: Info.plist missing from $APP_PATH"
             exit 1
           fi
 
@@ -96,10 +115,5 @@ jobs:
         with:
           name: GeneralsXZH-IPA
           path: ${{ runner.temp }}/GeneralsXZH.ipa
-          if-no-files-found: error
-          retention-days: 7
-        with:
-          name: Generals-iOS-build
-          path: ${{ runner.temp }}/ios-output/*
           if-no-files-found: error
           retention-days: 7

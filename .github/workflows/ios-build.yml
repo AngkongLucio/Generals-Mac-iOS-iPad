@@ -16,7 +16,7 @@ jobs:
 
       - name: Install build tools
         run: |
-          brew install cmake ninja meson xcodegen
+          brew install cmake ninja meson xcodegen glslang
 
       - name: Install vcpkg
         run: |

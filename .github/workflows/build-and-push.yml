@@ -1,144 +1,97 @@
-name: GeneralsX CI
-
-permissions:
-  contents: read
-  pull-requests: write
+name: Build & Push .ipa
 
 on:
-  push:
-    branches:
-      - main
-  pull_request:
-    branches:
-      - main
-  workflow_dispatch:
+push:
+branches:
+- main # Run on pushes to main (adjust if you use a different branch)
+workflow_dispatch: # Allows you to trigger manually from the Actions tab
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+env:
+APP_NAME: <YOUR_APP_NAME> # e.g., MyApp
+TARGET_NAME: <YOUR_TARGET> # e.g., MyApp
+CODE_SIGN_IDENTITY: "Apple Distribution"
+PROVISIONING_PROFILE_SPECIFIER: "MyApp Distribution" # exact name from Apple Developer portal
+GITHUB_PAT: ${{ secrets.GITHUB_PAT }} # PAT stored as a repository secret
 
 jobs:
-  detect-changes:
-    name: Detect File Changes
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    outputs:
-      zh-should-build: ${{ steps.filter.outputs.zh-should-build }}
-      base-should-build: ${{ steps.filter.outputs.base-should-build }}
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v6
+build:
+name: Build .ipa
+runs-on: macos-14 # macOS 14 “Sonoma”; change to macos-13 if you prefer
+steps:
+- name: Checkout repository
+uses: actions/checkout@v4
 
-      - name: Filter Changed Paths
-        uses: dorny/paths-filter@v4
-        id: filter
-        with:
-          token: ''
-          filters: |
-            zh-should-build:
-              - 'GeneralsMD/**'
-              - 'Core/**'
-              - 'Dependencies/**'
-              - 'cmake/**'
-              - 'CMakeLists.txt'
-              - 'CMakePresets.json'
-              - '.github/workflows/build-*.yml'
-              - '.github/workflows/ci.yml'
-            base-should-build:
-              - 'Generals/**'
-              - 'Core/**'
-              - 'Dependencies/**'
-              - 'cmake/**'
-              - 'CMakeLists.txt'
-              - 'CMakePresets.json'
-              - '.github/workflows/build-*.yml'
-              - '.github/workflows/ci.yml'
+- name: Set up Ruby (needed for fastlane if you use it)
+uses: ruby/setup-ruby@v1
+with:
+ruby-version: 3.2
 
-      - name: Build Trigger Summary
-        run: |
-          echo "### 🔍 CI Trigger (Granular)" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Target | Status |" >> $GITHUB_STEP_SUMMARY
-          echo "|--------|--------|" >> $GITHUB_STEP_SUMMARY
-          if [ "${{ steps.filter.outputs.zh-should-build }}" = "true" ]; then
-            echo "| GeneralsX ZH (GeneralsMD) | ✅ Changes detected |" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "| GeneralsX ZH (GeneralsMD) | ⏭️ No changes |" >> $GITHUB_STEP_SUMMARY
-          fi
-          if [ "${{ steps.filter.outputs.base-should-build }}" = "true" ]; then
-            echo "| GeneralsX Base (Generals) | ✅ Changes detected |" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "| GeneralsX Base (Generals) | ⏭️ No changes |" >> $GITHUB_STEP_SUMMARY
-          fi
+- name: Install Fastlane (optional, but handy for signing)
+run: gem install fastlane
 
-  build-linux-flatpak:
-    name: Build Linux Flatpak
-    needs: detect-changes
-    if: needs.detect-changes.outputs.zh-should-build == 'true' || needs.detect-changes.outputs.base-should-build == 'true' || github.event_name == 'workflow_dispatch'
-    uses: ./.github/workflows/build-linux-flatpak.yml
-    with:
-      preset: linux64-deploy
-    secrets: inherit
+# ----------
+# 1. Build the .ipa
+# ----------
+- name: Build .ipa
+env:
+# Pass the PAT into the build script via an environment variable
+GITHUB_PAT: ${{ secrets.GITHUB_PAT }}
+run: |
+echo "=== Building archive ==="
+xcodebuild clean -project $APP_NAME.xcodeproj -scheme $TARGET_NAME -configuration Release
+xcodebuild archive \
+-project $APP_NAME.xcodeproj \
+-scheme $TARGET_NAME \
+-configuration Release \
+-archivePath ./build/$APP_NAME.xcarchive \
+CODE_SIGN_IDENTITY="$CODE_SIGN_IDENTITY" \
+PROVISIONING_PROFILE_SPECIFIER="$PROVISIONING_PROFILE_SPECIFIER" \
+OTHER_CODE_SIGN_FLAGS="--force"
 
-  build-macos:
-    name: Build macOS
-    needs: detect-changes
-    if: needs.detect-changes.outputs.zh-should-build == 'true' || needs.detect-changes.outputs.base-should-build == 'true' || github.event_name == 'workflow_dispatch'
-    uses: ./.github/workflows/build-macos.yml
-    with:
-      preset: macos-vulkan
-    secrets: inherit
+echo "=== Exporting .ipa ==="
+xcodebuild -exportArchive \
+-archivePath ./build/$APP_NAME.xcarchive \
+-exportPath ./build/exports \
+-exportOptionsPlist <<END
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+"http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+<key>method</key> <string>app-store</string>
+<key>signingStyle</key> <string>manual</string>
+<key>signingCertificate</key> <string>$CODE_SIGN_IDENTITY</string>
+<key>provisioningProfiles</key>
+<dict>
+<key>$TARGET_NAME</key> <string>$PROVISIONING_PROFILE_SPECIFIER</string>
+</dict>
+<key>stripSwiftSymbols</key> <true/>
+<key>compileBitcode</key> <false/>
+</dict>
+</plist>
+END
 
-  # GeneralsX @build BenderAI 18/05/2026 Deterministic replay tests run after Flatpak build on Linux and app build on macOS.
-  # Each job downloads the built artifact, extracts game assets (ASSETS_KEY secret) and
-  # platform replays from fbraz3/GeneralsXReplays, then runs headless replay simulations.
-  replay-test-linux:
-    name: Replay Tests (linux)
-    needs: [build-linux-flatpak]
-    if: needs.build-linux-flatpak.result == 'success'
-    uses: ./.github/workflows/replay-tests.yml
-    with:
-      platform: linux-flatpak
-      game-artifact: linux-flatpak-generalsxzh-linux64-deploy
-    secrets:
-      ASSETS_KEY: ${{ secrets.ASSETS_KEY }}
+echo "=== .ipa path ==="
+ls -l ./build/exports/*.ipa
 
-  replay-test-macos:
-    name: Replay Tests (macos)
-    needs: [build-macos]
-    if: needs.build-macos.result == 'success'
-    uses: ./.github/workflows/replay-tests.yml
-    with:
-      platform: macos
-      game-artifact: macos-generalsxzh-app
-    secrets:
-      ASSETS_KEY: ${{ secrets.ASSETS_KEY }}
+# ----------
+# 2. Commit the .ipa to the repo
+# ----------
+- name: Commit .ipa
+run: |
+# Move the ipa to a place that can be added to git
+mkdir -p ipa-builds
+cp ./build/exports/*.ipa ipa-builds/
+git config user.name "github-actions[bot]"
+git config user.email "github-actions[bot]@users.noreply.github.com"
+git add ipa-builds/*.ipa
+git commit -m "Add build $(date +'%Y-%m-%d_%H-%M-%S')" || echo "No changes to commit"
+git push https://$GITHUB_PAT@github.com/${{ github.repository }}.git
 
-  ci-summary:
-    name: CI Summary
-    runs-on: ubuntu-latest
-    needs: [build-linux-flatpak, build-macos, replay-test-linux, replay-test-macos]
-    if: always()
-    steps:
-      - name: Generate Summary
-        run: |
-          echo "### GeneralsX Multi-Platform Build Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Platform | Status |" >> $GITHUB_STEP_SUMMARY
-          echo "|----------|--------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Linux Flatpak | ${{ needs.build-linux-flatpak.result == 'success' && '✅ Success' || needs.build-linux-flatpak.result == 'skipped' && '⏭️ Skipped' || needs.build-linux-flatpak.result == 'cancelled' && '⏭️ Skipped' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| macOS (arm64) | ${{ needs.build-macos.result == 'success' && '✅ Success' || needs.build-macos.result == 'skipped' && '⏭️ Skipped' || needs.build-macos.result == 'cancelled' && '⏭️ Skipped' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Replay Tests | Status |" >> $GITHUB_STEP_SUMMARY
-          echo "|--------------|--------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Linux ZH replays | ${{ needs.replay-test-linux.result == 'success' && '✅ Pass' || needs.replay-test-linux.result == 'skipped' && '⏭️ Skipped' || needs.replay-test-linux.result == 'cancelled' && '⏭️ Skipped' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| macOS ZH replays | ${{ needs.replay-test-macos.result == 'success' && '✅ Pass' || needs.replay-test-macos.result == 'skipped' && '⏭️ Skipped' || needs.replay-test-macos.result == 'cancelled' && '⏭️ Skipped' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
-
-      - name: Fail if Any Build or Replay Test Failed
-        if: |
-          needs.build-linux-flatpak.result == 'failure' ||
-          needs.build-macos.result == 'failure' ||
-          needs.replay-test-linux.result == 'failure' ||
-          needs.replay-test-macos.result == 'failure'
-        run: exit 1
+# ----------
+# 3. (Optional) Create a Release with the .ipa attached
+# ----------
+- name: Create Release
+if: github.ref == 'refs/heads/main' # only on main branch pushes
+uses: softprops/action-gh-release@v2
 
